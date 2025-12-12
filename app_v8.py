@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 
 # --- 1. 設定網頁標題 ---
 st.set_page_config(page_title="智能投資組合優化器", layout="wide")
-st.title('📈 智能投資組合優化器 (自訂基準版)')
+st.title('📈 智能投資組合優化器 (融資效益版)')
 st.markdown("""
 此工具提供華爾街等級的投資組合分析，包含 **風險控管**、**融資模擬** 與 **複合基準指數對照**。
 """)
@@ -19,13 +19,13 @@ st.sidebar.header('參數設定')
 tickers_input = st.sidebar.text_input('股票/基金代號 (請用空白隔開)', 'VFIAX VBTLX TSLA NVDA')
 user_tickers = tickers_input.upper().split()
 
-# ★ 新增功能：複合 Benchmark 輸入
+# 基準指數設定
 st.sidebar.markdown("---")
 st.sidebar.header("⚖️ 基準指數設定 (Benchmark)")
 bench_input = st.sidebar.text_input(
     '基準代號與權重 (格式: 代號:%)', 
     'SPY:60 AGG:40', 
-    help="請用冒號指定權重，並用空白隔開。\n例如：\n1. 股債平衡: SPY:60 AGG:40\n2. 純美股: SPY\n3. 全球股債: VT:50 BNDW:50"
+    help="請用冒號指定權重，並用空白隔開。\n例如：\n1. 股債平衡: SPY:60 AGG:40\n2. 純美股: SPY"
 )
 
 years = st.sidebar.slider('回測年數', 1, 20, 10)
@@ -52,7 +52,7 @@ if st.sidebar.button('開始計算'):
     if len(user_tickers) < 2:
         st.error("請至少輸入兩檔標的。")
     else:
-        with st.spinner('正在下載數據並建構客製化基準指數...'):
+        with st.spinner('正在計算融資效益與回測數據...'):
             try:
                 # ==========================
                 # A. 數據準備
@@ -76,10 +76,9 @@ if st.sidebar.button('開始計算'):
                 
                 tickers = df_close.columns.tolist()
 
-                # 2. ★ 解析與下載 Benchmark 數據
+                # 2. 下載與合成 Benchmark
                 bench_config = []
                 try:
-                    # 解析字串 "SPY:60 AGG:40"
                     items = bench_input.strip().split()
                     for item in items:
                         if ':' in item:
@@ -88,10 +87,9 @@ if st.sidebar.button('開始計算'):
                             weight = float(parts[1])
                         else:
                             ticker = item.upper()
-                            weight = 100.0 # 預設 100%
+                            weight = 100.0 
                         bench_config.append({'ticker': ticker, 'weight': weight})
                     
-                    # 權重歸一化 (變成小數點，總和為 1)
                     total_bench_w = sum([x['weight'] for x in bench_config])
                     if total_bench_w == 0: total_bench_w = 1
                     for x in bench_config:
@@ -104,7 +102,6 @@ if st.sidebar.button('開始計算'):
                     st.error(f"基準指數格式錯誤: {e}")
                     st.stop()
 
-                # 下載 Benchmark 數據
                 bench_data_raw = yf.download(bench_tickers, start=start_date, end=end_date, auto_adjust=True)
                 
                 if 'Close' in bench_data_raw.columns:
@@ -112,39 +109,28 @@ if st.sidebar.button('開始計算'):
                 else:
                     df_bench_raw = bench_data_raw
                 
-                # 如果只有單一檔，轉成 DataFrame 方便統一處理
                 if isinstance(df_bench_raw, pd.Series):
                     df_bench_raw = df_bench_raw.to_frame(name=bench_tickers[0])
 
-                # 3. 日期對齊與合成 Benchmark
-                # 確保 Benchmark 跟投資組合的日期對齊 (取交集)
+                # 日期對齊
                 common_index = df_close.index.intersection(df_bench_raw.index)
                 df_close = df_close.loc[common_index]
                 df_bench_raw = df_bench_raw.loc[common_index]
                 
                 if df_bench_raw.empty:
-                    st.warning("無法抓取 Benchmark 數據，將不顯示對照線。")
                     normalized_bench = None
                 else:
-                    # 計算 Benchmark 的每日報酬率
                     bench_daily_ret = df_bench_raw.pct_change().fillna(0)
-                    
-                    # ★ 合成指數：將各成份股報酬率依照權重加總 (模擬每日再平衡)
-                    # 如果有多檔，依照權重加權平均
-                    # 注意：如果 df_bench_raw 欄位順序跟 bench_tickers 不一樣，要對齊
-                    # 這裡簡單處理：直接用 bench_tickers 來選欄位
                     try:
                         aligned_bench_ret = bench_daily_ret[bench_tickers]
                         composite_bench_ret = aligned_bench_ret.dot(bench_weights)
                     except:
-                        # 萬一欄位抓不到 (例如下市)，用平均
                         composite_bench_ret = bench_daily_ret.mean(axis=1)
 
-                    # 計算累積淨值
                     normalized_bench = (1 + composite_bench_ret).cumprod()
                     normalized_bench.name = "基準指數 (Benchmark)"
 
-                # 4. 計算投資組合統計數據
+                # 統計數據
                 returns = df_close.pct_change().dropna()
                 cov_matrix = returns.cov() * 252
                 mean_returns = returns.mean() * 252
@@ -157,17 +143,12 @@ if st.sidebar.button('開始計算'):
                 
                 normalized_prices = df_close / df_close.iloc[0]
 
-                # --------------------------
-                # MDD 計算函數
-                # --------------------------
+                # 函數庫
                 def calculate_mdd(series):
                     roll_max = series.cummax()
                     drawdown = (series - roll_max) / roll_max
                     return drawdown.min()
 
-                # --------------------------
-                # 融資回測函數
-                # --------------------------
                 def calculate_margin_equity(raw_portfolio_value, leverage, loan_ratio, annual_rate):
                     if leverage == 1:
                         return raw_portfolio_value
@@ -186,22 +167,16 @@ if st.sidebar.button('開始計算'):
                 # ==========================
                 tab1, tab2 = st.tabs(["🛡️ 最小風險組合", "🚀 最大夏普組合"])
 
-                # --- 共用繪圖函數 ---
+                # --- 繪圖函數 ---
                 def plot_performance(port_val, strategy_name, color):
-                    # 顯示 Benchmark 的名稱
                     bench_label = f"基準 ({bench_input})"
-                    
-                    fig = px.line(port_val, title=f'資產成長回測 (vs {bench_input})')
+                    fig = px.line(port_val, title=f'資產成長回測')
                     fig.update_traces(line=dict(color=color, width=3), name=strategy_name)
                     
-                    # 加入 Benchmark 線
                     if normalized_bench is not None:
-                        # 為了畫圖，要重新 index 對齊一下
                         aligned_bench = normalized_bench.reindex(port_val.index).fillna(method='ffill')
-                        # 歸一化 (起點設為1，跟投資組合在同一條起跑線)
                         if aligned_bench.iloc[0] > 0:
                             aligned_bench = aligned_bench / aligned_bench.iloc[0]
-                        
                         fig.add_trace(go.Scatter(x=aligned_bench.index, y=aligned_bench, 
                                                  mode='lines', name=bench_label, 
                                                  line=dict(color='gray', width=2, dash='dash')))
@@ -212,7 +187,7 @@ if st.sidebar.button('開始計算'):
                 with tab1:
                     st.subheader("🛡️ 最小風險組合 (GMV)")
                     if use_margin:
-                        st.caption(f"⚠️ **融資模式**：槓桿 {leverage:.1f} 倍")
+                        st.caption(f"⚠️ **融資模式**：槓桿 {leverage:.1f} 倍 | 年利率 {margin_rate:.1%}")
 
                     def min_variance(weights, cov_matrix):
                         return np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
@@ -236,7 +211,6 @@ if st.sidebar.button('開始計算'):
                         df_min = pd.DataFrame({'標的': tickers, '配置': clean_w})
                         df_min['顯示權重'] = df_min['配置'].apply(lambda x: f"{x:.1%}")
                         df_min = df_min.sort_values('配置', ascending=False)
-                        
                         st.table(df_min[['標的', '顯示權重']])
                         
                         fig_pie = px.pie(df_min[df_min['配置']>0], values='配置', names='標的', hole=0.4)
@@ -250,19 +224,33 @@ if st.sidebar.button('開始計算'):
                         
                         plot_performance(margin_port_val, "🛡️ 最小風險組合", "green")
                         
+                        # ★ 計算融資效益差異 (關鍵修改)
                         total_ret = margin_port_val.iloc[-1] - 1
+                        raw_total_ret = raw_port_val.iloc[-1] - 1 # 沒融資的報酬
+                        
                         cagr = (margin_port_val.iloc[-1])**(1/years) - 1 if margin_port_val.iloc[-1] > 0 else -1
                         mdd = calculate_mdd(margin_port_val)
                         
-                        # Benchmark 績效
+                        # Benchmark 報酬
                         if normalized_bench is not None:
                             bench_total_ret = normalized_bench.iloc[-1]/normalized_bench.iloc[0] - 1
                         else:
                             bench_total_ret = 0
                         
+                        # 決定顯示什麼 Delta
+                        if use_margin:
+                            # 如果開融資，顯示「比不融資多賺多少」
+                            margin_diff = total_ret - raw_total_ret
+                            delta_msg = f"融資效益: {margin_diff:+.2%}"
+                            delta_color = "normal" # 綠漲紅跌
+                        else:
+                            # 沒融資，顯示「比大盤強多少」
+                            delta_msg = f"vs Benchmark: {total_ret - bench_total_ret:+.2%}"
+                            delta_color = "normal"
+
                         st.markdown("### 💰 回測結果")
                         cb1, cb2, cb3 = st.columns(3)
-                        cb1.metric("總報酬率", f"{total_ret:.2%}", delta=f"vs Benchmark: {total_ret - bench_total_ret:.2%}")
+                        cb1.metric("總報酬率", f"{total_ret:.2%}", delta=delta_msg, delta_color=delta_color)
                         cb2.metric("年化報酬", f"{cagr:.2%}")
                         cb3.metric("最大回撤", f"{mdd:.2%}", delta="注意風險", delta_color="inverse")
 
@@ -270,7 +258,7 @@ if st.sidebar.button('開始計算'):
                 with tab2:
                     st.subheader("🚀 最大夏普組合 (Max Sharpe)")
                     if use_margin:
-                        st.caption(f"⚠️ **融資模式**：槓桿 {leverage:.1f} 倍")
+                        st.caption(f"⚠️ **融資模式**：槓桿 {leverage:.1f} 倍 | 年利率 {margin_rate:.1%}")
 
                     def neg_sharpe_ratio(weights, mean_returns, cov_matrix, rf):
                         p_ret = np.sum(mean_returns * weights)
@@ -299,7 +287,6 @@ if st.sidebar.button('開始計算'):
                         df_sharpe = pd.DataFrame({'標的': tickers, '配置': clean_w_s})
                         df_sharpe['顯示權重'] = df_sharpe['配置'].apply(lambda x: f"{x:.1%}")
                         df_sharpe = df_sharpe.sort_values('配置', ascending=False)
-                        
                         st.table(df_sharpe[['標的', '顯示權重']])
                         
                         fig_pie_s = px.pie(df_sharpe[df_sharpe['配置']>0], values='配置', names='標的', hole=0.4)
@@ -313,19 +300,28 @@ if st.sidebar.button('開始計算'):
                         
                         plot_performance(margin_port_val_s, "🚀 最大夏普組合", "red")
                         
+                        # ★ 計算融資效益差異
                         total_ret_s = margin_port_val_s.iloc[-1] - 1
+                        raw_total_ret_s = raw_port_val_s.iloc[-1] - 1
+                        
                         cagr_s = (margin_port_val_s.iloc[-1])**(1/years) - 1 if margin_port_val_s.iloc[-1] > 0 else -1
                         mdd_s = calculate_mdd(margin_port_val_s)
                         
-                        # Benchmark 績效
                         if normalized_bench is not None:
                             bench_total_ret = normalized_bench.iloc[-1]/normalized_bench.iloc[0] - 1
                         else:
                             bench_total_ret = 0
-                        
+                            
+                        # 決定顯示什麼 Delta
+                        if use_margin:
+                            margin_diff_s = total_ret_s - raw_total_ret_s
+                            delta_msg_s = f"融資效益: {margin_diff_s:+.2%}"
+                        else:
+                            delta_msg_s = f"vs Benchmark: {total_ret_s - bench_total_ret:+.2%}"
+
                         st.markdown("### 💰 回測結果")
                         csb1, csb2, csb3 = st.columns(3)
-                        csb1.metric("總報酬率", f"{total_ret_s:.2%}", delta=f"vs Benchmark: {total_ret_s - bench_total_ret:.2%}")
+                        csb1.metric("總報酬率", f"{total_ret_s:.2%}", delta=delta_msg_s, delta_color="normal")
                         csb2.metric("年化報酬", f"{cagr_s:.2%}")
                         csb3.metric("最大回撤", f"{mdd_s:.2%}", delta="注意風險", delta_color="inverse")
 
