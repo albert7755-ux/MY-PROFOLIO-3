@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 
 # --- 1. 設定網頁標題 ---
 st.set_page_config(page_title="智能投資組合優化器", layout="wide")
-st.title('📈 智能投資組合優化器 (融資效益版)')
+st.title('📈 智能投資組合優化器 (融初效益版)')
 st.markdown("""
 此工具提供華爾街等級的投資組合分析，包含 **風險控管**、**融資模擬** 與 **複合基準指數對照**。
 """)
@@ -174,7 +174,8 @@ if st.sidebar.button('開始計算'):
                     fig.update_traces(line=dict(color=color, width=3), name=strategy_name)
                     
                     if normalized_bench is not None:
-                        aligned_bench = normalized_bench.reindex(port_val.index).fillna(method='ffill')
+                        # 這是您遇到錯誤的地方，已經修正為 .ffill()
+                        aligned_bench = normalized_bench.reindex(port_val.index).ffill()
                         if aligned_bench.iloc[0] > 0:
                             aligned_bench = aligned_bench / aligned_bench.iloc[0]
                         fig.add_trace(go.Scatter(x=aligned_bench.index, y=aligned_bench, 
